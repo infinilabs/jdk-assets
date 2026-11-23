@@ -12,7 +12,6 @@ on:
           - tencent-kona
           - eclipse-temurin
           - amazon-corretto
-          - oracle-graalvm
       major_version:
         description: "选择 JDK 主版本"
         type: choice
