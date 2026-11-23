@@ -95,18 +95,21 @@ jobs:
               echo "${release_json}" | jq -r '.assets[] | "\(.name)\t\(.browser_download_url)"' | \
               while IFS=$'\t' read -r name url; do
                 echo "Downloading ${name} ..."
-                curl -fSL --retry 3 --retry-delay 5 -o "work/${name}" "${url}"
+                curl -fsSL --retry 3 --retry-delay 5 -o "work/${name}" "${url}"
               done
 
               for archive in work/*.tar.gz work/*.zip; do
                 if [ -f "${archive}.md5" ]; then
-                  expected="$(awk '{print $1}' "${archive}.md5" | tr -d '\r')"
-                  actual="$(md5sum "${archive}" | awk '{print $1}')"
-                  if [ "${expected}" != "${actual}" ]; then
+                  expected="$(grep -oE '(^|[^0-9a-fA-F])[0-9a-fA-F]{32}([^0-9a-fA-F]|$)' "${archive}.md5" | grep -oE '[0-9a-fA-F]{32}' | head -n1 | tr '[:upper:]' '[:lower:]')"
+                  actual="$(md5sum "${archive}" | awk '{print $1}' | tr '[:upper:]' '[:lower:]')"
+                  if [ -z "${expected}" ] || [ "${expected}" != "${actual}" ]; then
                     echo "ERROR: MD5 mismatch for $(basename "${archive}")"
+                    echo "  raw .md5 : $(cat "${archive}.md5")"
+                    echo "  expected : ${expected}"
+                    echo "  actual   : ${actual}"
                     exit 1
                   fi
-                  echo "Verified MD5: $(basename "${archive}")"
+                  echo "Verified MD5: $(basename "${archive}") (${actual})"
                 fi
               done
 
@@ -135,15 +138,16 @@ jobs:
                 ext="${item##*:}"
                 file="graalvm-jdk-25_${plat}_bin.${ext}"
                 url="https://download.oracle.com/graalvm/25/latest/${file}"
-                echo "Downloading ${url} ..."
-                curl -fSL --retry 3 --retry-delay 5 -o "work/${file}" "${url}"
-                curl -fSL --retry 3 --retry-delay 5 -o "work/${file}.sha256" "${url}.sha256"
-                expected="$(awk '{print $1}' "work/${file}.sha256")"
-                actual="$(sha256sum "work/${file}" | awk '{print $1}')"
-                if [ "${expected}" != "${actual}" ]; then
-                  echo "ERROR: SHA256 mismatch for ${file}"
+                echo "Downloading ${file} ..."
+                curl -fsSL --retry 3 --retry-delay 5 -o "work/${file}" "${url}"
+                curl -fsSL --retry 3 --retry-delay 5 -o "work/${file}.sha256" "${url}.sha256"
+                expected="$(grep -oE '[0-9a-fA-F]{64}' "work/${file}.sha256" | head -n1 | tr '[:upper:]' '[:lower:]')"
+                actual="$(sha256sum "work/${file}" | awk '{print $1}' | tr '[:upper:]' '[:lower:]')"
+                if [ -z "${expected}" ] || [ "${expected}" != "${actual}" ]; then
+                  echo "ERROR: SHA256 mismatch for ${file} (expected=${expected}, actual=${actual})"
                   exit 1
                 fi
+                echo "Verified SHA256: ${file} (${actual})"
               done
 
               mkdir -p work/extract
@@ -181,17 +185,18 @@ jobs:
 
                 pkg_name="$(echo "${json}" | jq -r '.[0].binary.package.name')"
                 pkg_link="$(echo "${json}" | jq -r '.[0].binary.package.link')"
-                pkg_sha="$(echo "${json}" | jq -r '.[0].binary.package.checksum')"
+                pkg_sha="$(echo "${json}" | jq -r '.[0].binary.package.checksum' | tr '[:upper:]' '[:lower:]')"
                 release_name="$(echo "${json}" | jq -r '.[0].release_name')"
                 ver_quad="$(echo "${json}" | jq -r '.[0].version_data | "\(.major).\(.minor).\(.security).\(.patch // 0)"')"
 
                 echo "Downloading ${pkg_name} (${release_name}) ..."
-                curl -fSL --retry 3 --retry-delay 5 -o "dist/${pkg_name}" "${pkg_link}"
-                actual="$(sha256sum "dist/${pkg_name}" | awk '{print $1}')"
+                curl -fsSL --retry 3 --retry-delay 5 -o "dist/${pkg_name}" "${pkg_link}"
+                actual="$(sha256sum "dist/${pkg_name}" | awk '{print $1}' | tr '[:upper:]' '[:lower:]')"
                 if [ "${pkg_sha}" != "${actual}" ]; then
-                  echo "ERROR: SHA256 mismatch for ${pkg_name}"
+                  echo "ERROR: SHA256 mismatch for ${pkg_name} (expected=${pkg_sha}, actual=${actual})"
                   exit 1
                 fi
+                echo "Verified SHA256: ${pkg_name} (${actual})"
               done
 
               check_patched_version "${ver_quad}"
@@ -220,14 +225,15 @@ jobs:
                 url="https://corretto.aws/downloads/latest/${file}"
                 sha_url="https://corretto.aws/downloads/latest_sha256/${file}"
 
-                echo "Downloading ${url} ..."
-                curl -fSL --retry 3 --retry-delay 5 -o "work/${file}" "${url}"
-                expected="$(curl -fsSL --retry 3 --retry-delay 5 "${sha_url}" | awk '{print $1}')"
-                actual="$(sha256sum "work/${file}" | awk '{print $1}')"
-                if [ "${expected}" != "${actual}" ]; then
-                  echo "ERROR: SHA256 mismatch for ${file}"
+                echo "Downloading ${file} ..."
+                curl -fsSL --retry 3 --retry-delay 5 -o "work/${file}" "${url}"
+                expected="$(curl -fsSL --retry 3 --retry-delay 5 "${sha_url}" | grep -oE '[0-9a-fA-F]{64}' | head -n1 | tr '[:upper:]' '[:lower:]')"
+                actual="$(sha256sum "work/${file}" | awk '{print $1}' | tr '[:upper:]' '[:lower:]')"
+                if [ -z "${expected}" ] || [ "${expected}" != "${actual}" ]; then
+                  echo "ERROR: SHA256 mismatch for ${file} (expected=${expected}, actual=${actual})"
                   exit 1
                 fi
+                echo "Verified SHA256: ${file} (${actual})"
               done
 
               mkdir -p work/extract
