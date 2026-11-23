@@ -43,10 +43,21 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p out
-          actual_version="$(awk -F'"' '/^JAVA_VERSION=/{print $2}' "${GRAALVM_HOME}/release")"
-          echo "Detected JAVA_VERSION=${actual_version}"
 
-          # 纯 Bash 版本比较（兼容 Linux / macOS / Windows），确保 >= 25.0.5.1
+          JDK_DIR="${GRAALVM_HOME:-${JAVA_HOME:-}}"
+          if [ -z "${JDK_DIR}" ] || [ ! -d "${JDK_DIR}" ]; then
+            JDK_DIR="$(dirname "$(dirname "$(command -v java)")")"
+          fi
+          echo "JDK_DIR=${JDK_DIR}"
+          cat "${JDK_DIR}/release"
+          java_out="$("${JDK_DIR}/bin/java" -version 2>&1)"
+          echo "=== java -version ==="
+          echo "${java_out}"
+
+          # 从 java -version 输出中提取完整版本（如 25.0.5.1）
+          actual_version="$(echo "${java_out}" | grep -oE '25\.[0-9]+(\.[0-9]+){1,2}' | head -n1)"
+          echo "Detected actual_version=${actual_version}"
+
           IFS='.' read -r v1 v2 v3 v4 <<< "${actual_version}.0.0.0"
           ver_ok=false
           if [ "${v1}" -gt 25 ]; then ver_ok=true
@@ -59,8 +70,8 @@ jobs:
             exit 1
           fi
 
-          base_dir="$(dirname "${GRAALVM_HOME}")"
-          folder_name="$(basename "${GRAALVM_HOME}")"
+          base_dir="$(dirname "${JDK_DIR}")"
+          folder_name="$(basename "${JDK_DIR}")"
           pkg_name="graalvm-jdk-${actual_version}_${{ matrix.plat }}_bin.${{ matrix.ext }}"
 
           if [ "${{ matrix.ext }}" = "tar.gz" ]; then
