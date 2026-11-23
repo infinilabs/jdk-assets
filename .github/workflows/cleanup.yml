@@ -1,0 +1,51 @@
+name: Delete All Releases
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "输入 DELETE 确认删除本仓库所有 Release 和 Tag"
+        type: string
+        required: true
+        default: "DELETE"
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Check confirmation
+        run: |
+          if [ "${{ inputs.confirm }}" != "DELETE" ]; then
+            echo "未输入 DELETE 确认，已取消操作。"
+            exit 1
+          fi
+
+      - name: Delete all releases and tags
+        run: |
+          set -euo pipefail
+          REPO="${{ github.repository }}"
+
+          tags="$(gh release list --repo "${REPO}" --limit 200 --json tagName -q '.[].tagName')"
+          if [ -z "${tags}" ]; then
+            echo "当前没有任何 Release。"
+          else
+            for tag in ${tags}; do
+              echo "Deleting release and tag: ${tag}"
+              gh release delete "${tag}" --repo "${REPO}" --yes --cleanup-tag
+            done
+          fi
+
+          # 清理可能残留的孤立 Git Tag
+          orphan_refs="$(gh api --paginate "repos/${REPO}/git/refs/tags" --jq '.[].ref' 2>/dev/null || true)"
+          for ref in ${orphan_refs}; do
+            tag_name="${ref#refs/tags/}"
+            echo "Deleting leftover tag: ${tag_name}"
+            gh api -X DELETE "repos/${REPO}/git/refs/tags/${tag_name}" >/dev/null || true
+          done
+
+          echo "全部 Release 和 Tag 已清理完成。"
