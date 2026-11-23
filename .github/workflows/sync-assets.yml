@@ -1,0 +1,149 @@
+name: Sync Agents & Scripts to Releases
+
+on:
+  workflow_dispatch:
+    inputs:
+      sync_agents:
+        description: "同步 agents 目录到 Release"
+        type: boolean
+        default: true
+      sync_scripts:
+        description: "同步 scripts 目录到 Release"
+        type: boolean
+        default: true
+  push:
+    branches:
+      - main
+    paths:
+      - "agents/**"
+      - "scripts/**"
+
+permissions:
+  contents: write
+
+jobs:
+  publish-agents:
+    if: ${{ github.event_name == 'push' || inputs.sync_agents }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Collect, verify & prepare agents
+        run: |
+          set -euo pipefail
+          mkdir -p dist work
+          shopt -s nullglob
+
+          while IFS= read -r -d '' file; do
+            cp "${file}" dist/
+          done < <(find agents -type f -print0)
+
+          (
+            cd dist
+            archives=( *.tar.gz *.zip )
+            if [ "${#archives[@]}" -eq 0 ]; then
+              echo "ERROR: No archive files found under agents/"
+              exit 1
+            fi
+
+            for f in "${archives[@]}"; do
+              if [ -f "${f}.sha512" ]; then
+                expected="$(awk '{print $1}' "${f}.sha512" | tr -d '\r' | tr '[:upper:]' '[:lower:]')"
+                actual="$(sha512sum "${f}" | awk '{print $1}' | tr '[:upper:]' '[:lower:]')"
+                if [ -z "${expected}" ] || [ "${expected}" != "${actual}" ]; then
+                  echo "ERROR: SHA512 mismatch for ${f} (expected=${expected}, actual=${actual})"
+                  exit 1
+                fi
+                echo "Verified existing SHA512: ${f}"
+              else
+                sha512sum "${f}" > "${f}.sha512"
+                echo "Generated SHA512: ${f}.sha512"
+              fi
+            done
+          )
+
+          ls -lh dist/
+          {
+            printf 'Pre-packaged agent binaries synced from `agents/`.\n\n'
+            printf '```text\n'
+            (cd dist && sha512sum *.tar.gz *.zip 2>/dev/null || true)
+            printf '```\n'
+          } > work/release_notes.md
+
+      - name: Publish agents Release
+        run: |
+          set -euo pipefail
+          tag="agents"
+          if gh release view "${tag}" --repo "${REPO}" >/dev/null 2>&1; then
+            gh release upload "${tag}" dist/* --clobber --repo "${REPO}"
+            gh release edit "${tag}" --repo "${REPO}" --notes-file work/release_notes.md
+          else
+            gh release create "${tag}" dist/* \
+              --repo "${REPO}" \
+              --target "${{ github.ref_name }}" \
+              --title "Agents Assets" \
+              --notes-file work/release_notes.md
+          fi
+
+  publish-scripts:
+    if: ${{ github.event_name == 'push' || inputs.sync_scripts }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Collect scripts & generate .sha512
+        run: |
+          set -euo pipefail
+          mkdir -p dist work
+          shopt -s nullglob
+
+          while IFS= read -r -d '' file; do
+            cp "${file}" dist/
+          done < <(find scripts -type f -print0)
+
+          (
+            cd dist
+            files=( * )
+            if [ "${#files[@]}" -eq 0 ]; then
+              echo "ERROR: No files found under scripts/"
+              exit 1
+            fi
+
+            for f in "${files[@]}"; do
+              case "${f}" in
+                *.sha512|*.sha256) continue ;;
+              esac
+              if [ ! -f "${f}.sha512" ]; then
+                sha512sum "${f}" > "${f}.sha512"
+              fi
+            done
+          )
+
+          ls -lh dist/
+          {
+            printf 'Helper scripts synced from `scripts/`.\n\n'
+            printf '```text\n'
+            (cd dist && ls -1)
+            printf '```\n'
+          } > work/release_notes.md
+
+      - name: Publish scripts Release
+        run: |
+          set -euo pipefail
+          tag="scripts"
+          if gh release view "${tag}" --repo "${REPO}" >/dev/null 2>&1; then
+            gh release upload "${tag}" dist/* --clobber --repo "${REPO}"
+            gh release edit "${tag}" --repo "${REPO}" --notes-file work/release_notes.md
+          else
+            gh release create "${tag}" dist/* \
+              --repo "${REPO}" \
+              --target "${{ github.ref_name }}" \
+              --title "Helper Scripts" \
+              --notes-file work/release_notes.md
+          fi
