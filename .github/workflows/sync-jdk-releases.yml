@@ -288,14 +288,17 @@ jobs:
       - name: Publish Release
         run: |
           set -euo pipefail
-          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+          REPO="${{ github.repository }}"
+          if gh release view "${RELEASE_TAG}" --repo "${REPO}" >/dev/null 2>&1; then
             if [ "${{ inputs.force_overwrite }}" != "true" ]; then
               echo "Release ${RELEASE_TAG} already exists. Skip uploading (check force_overwrite to update)."
               exit 0
             fi
-            gh release upload "${RELEASE_TAG}" dist/* --clobber
+            gh release upload "${RELEASE_TAG}" dist/* --clobber --repo "${REPO}"
           else
             gh release create "${RELEASE_TAG}" dist/* \
+              --repo "${REPO}" \
+              --target "${{ github.ref_name }}" \
               --title "${RELEASE_TITLE}" \
               --notes-file work/release_notes.md
           fi
