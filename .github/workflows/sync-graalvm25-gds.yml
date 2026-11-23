@@ -58,7 +58,7 @@ jobs:
           actual_version="$(echo "${java_out}" | grep -oE '25\.[0-9]+(\.[0-9]+){1,2}' | head -n1)"
           echo "Detected actual_version=${actual_version}"
 
-          IFS='.' read -r v1 v2 v3 v4 <<< "${actual_version}.0.0.0"
+          IFS='.' read -r v1 v2 v3 v4 _rest <<< "${actual_version}.0.0.0"
           ver_ok=false
           if [ "${v1}" -gt 25 ]; then ver_ok=true
           elif [ "${v1}" -eq 25 ] && [ "${v2}" -gt 0 ]; then ver_ok=true
