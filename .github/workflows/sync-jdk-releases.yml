@@ -1,0 +1,227 @@
+name: Sync JDK to Releases
+
+on:
+  workflow_dispatch:
+    inputs:
+      brand:
+        description: "选择 JDK 品牌"
+        type: choice
+        required: true
+        default: "tencent-kona"
+        options:
+          - tencent-kona
+          - eclipse-temurin
+          - amazon-corretto
+          - oracle-graalvm
+      major_version:
+        description: "选择 JDK 主版本"
+        type: choice
+        required: true
+        default: "21"
+        options:
+          - "17"
+          - "21"
+          - "25"
+      require_patched:
+        description: "强制校验版本 (17.0.21.1 / 21.0.13.1 / 25.0.5.1)"
+        type: boolean
+        default: true
+      force_overwrite:
+        description: "若对应版本 Tag 的 Release 已存在，是否强制覆盖"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  sync-jdk:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      BRAND: ${{ inputs.brand }}
+      MAJOR_VER: ${{ inputs.major_version }}
+      REQUIRE_PATCHED: ${{ inputs.require_patched }}
+    steps:
+      - name: Validate selection & set minimum patched version
+        run: |
+          set -euo pipefail
+          case "${MAJOR_VER}" in
+            17) MIN_PATCHED="17.0.21.1" ;;
+            21) MIN_PATCHED="21.0.13.1" ;;
+            25) MIN_PATCHED="25.0.5.1" ;;
+            *) echo "Unsupported major version: ${MAJOR_VER}"; exit 1 ;;
+          esac
+
+          if [ "${BRAND}" = "oracle-graalvm" ] && [ "${MAJOR_VER}" != "25" ]; then
+            echo "ERROR: Oracle GraalVM ${MAJOR_VER} 修复版 (${MIN_PATCHED}) 已转为 OTN 商业许可，无免登录直链且禁止同步到公开仓库。"
+            echo "请改选 tencent-kona、eclipse-temurin 或 amazon-corretto 的 ${MAJOR_VER} 版本，或使用 oracle-graalvm + 25。"
+            exit 1
+          fi
+
+          echo "MIN_PATCHED=${MIN_PATCHED}" >> "$GITHUB_ENV"
+
+      - name: Download, verify & generate .sha512 (${{ inputs.brand }} ${{ inputs.major_version }})
+        run: |
+          set -euo pipefail
+          mkdir -p work dist
+          shopt -s nullglob
+
+          check_patched_version() {
+            local ver="$1"
+            if [ "${REQUIRE_PATCHED}" = "true" ]; then
+              if [ "$(printf '%s\n' "${MIN_PATCHED}" "${ver}" | sort -V | head -n1)" != "${MIN_PATCHED}" ]; then
+                echo "ERROR: ${BRAND} version ${ver} < ${MIN_PATCHED} (未包含 Java4Shell CVE-2026-114938 修复，已拦截发布！)"
+                exit 1
+              fi
+            fi
+          }
+
+          case "${BRAND}" in
+            tencent-kona)
+              repo="Tencent/TencentKona-${MAJOR_VER}"
+              release_json="$(curl -fsSL --retry 3 --retry-delay 5 \
+                -H "Authorization: Bearer ${GH_TOKEN}" \
+                "https://api.github.com/repos/${repo}/releases/latest")"
+
+              upstream_tag="$(echo "${release_json}" | jq -r '.tag_name')"
+              asset_count="$(echo "${release_json}" | jq '.assets | length')"
+              echo "Upstream ${repo} latest tag: ${upstream_tag}, assets: ${asset_count}"
+              if [ "${asset_count}" -eq 0 ]; then
+                echo "ERROR: Release ${upstream_tag} has no binary assets uploaded yet!"
+                exit 1
+              fi
+
+              echo "${release_json}" | jq -r '.assets[] | "\(.name)\t\(.browser_download_url)"' | \
+              while IFS=$'\t' read -r name url; do
+                echo "Downloading ${name} ..."
+                curl -fSL --retry 3 --retry-delay 5 -o "work/${name}" "${url}"
+              done
+
+              for archive in work/*.tar.gz work/*.zip; do
+                if [ -f "${archive}.md5" ]; then
+                  expected="$(awk '{print $1}' "${archive}.md5" | tr -d '\r')"
+                  actual="$(md5sum "${archive}" | awk '{print $1}')"
+                  if [ "${expected}" != "${actual}" ]; then
+                    echo "ERROR: MD5 mismatch for $(basename "${archive}")"
+                    exit 1
+                  fi
+                  echo "Verified MD5: $(basename "${archive}")"
+                fi
+              done
+
+              linux_pkg="$(ls work/*jdk_linux-x86_64.tar.gz | head -n1)"
+              mkdir -p work/extract
+              tar -xzf "${linux_pkg}" -C work/extract --strip-components=1
+              java_ver_raw="$(work/extract/bin/java -version 2>&1)"
+              actual_version="$(grep '^JAVA_VERSION=' work/extract/release | cut -d'"' -f2)"
+              check_patched_version "${actual_version}"
+
+              cp work/*.tar.gz work/*.zip dist/
+              RELEASE_TAG="kona-${actual_version}"
+              RELEASE_TITLE="Tencent Kona JDK ${actual_version} (LTS)"
+              SOURCE_DESC="[${repo} (${upstream_tag})](https://github.com/${repo}/releases/tag/${upstream_tag}) (GPLv2+CE)"
+              ;;
+
+            oracle-graalvm)
+              PLATFORMS=(
+                "linux-x64:tar.gz"
+                "linux-aarch64:tar.gz"
+                "macos-aarch64:tar.gz"
+                "windows-x64:zip"
+              )
+              for item in "${PLATFORMS[@]}"; do
+                plat="${item%%:*}"
+                ext="${item##*:}"
+                file="graalvm-jdk-25_${plat}_bin.${ext}"
+                url="https://download.oracle.com/graalvm/25/latest/${file}"
+                echo "Downloading ${url} ..."
+                curl -fSL --retry 3 --retry-delay 5 -o "work/${file}" "${url}"
+                curl -fSL --retry 3 --retry-delay 5 -o "work/${file}.sha256" "${url}.sha256"
+                expected="$(awk '{print $1}' "work/${file}.sha256")"
+                actual="$(sha256sum "work/${file}" | awk '{print $1}')"
+                if [ "${expected}" != "${actual}" ]; then
+                  echo "ERROR: SHA256 mismatch for ${file}"
+                  exit 1
+                fi
+              done
+
+              mkdir -p work/extract
+              tar -xzf "work/graalvm-jdk-25_linux-x64_bin.tar.gz" -C work/extract --strip-components=1
+              java_ver_raw="$(work/extract/bin/java -version 2>&1)"
+              actual_version="$(grep '^JAVA_VERSION=' work/extract/release | cut -d'"' -f2)"
+              check_patched_version "${actual_version}"
+
+              for item in "${PLATFORMS[@]}"; do
+                plat="${item%%:*}"
+                ext="${item##*:}"
+                mv "work/graalvm-jdk-25_${plat}_bin.${ext}" \
+                   "dist/graalvm-jdk-${actual_version}_${plat}_bin.${ext}"
+              done
+
+              RELEASE_TAG="graalvm-${actual_version}"
+              RELEASE_TITLE="Oracle GraalVM ${actual_version} (LTS)"
+              SOURCE_DESC="Oracle official GraalVM 25 LTS distribution (GFTC License)"
+              ;;
+
+            eclipse-temurin)
+              PLATFORMS=(
+                "linux:x64"
+                "linux:aarch64"
+                "mac:aarch64"
+                "windows:x64"
+              )
+              release_name=""
+              ver_quad=""
+              for item in "${PLATFORMS[@]}"; do
+                os="${item%%:*}"
+                arch="${item##*:}"
+                meta_url="https://api.adoptium.net/v3/assets/latest/${MAJOR_VER}/hotspot?os=${os}&architecture=${arch}&image_type=jdk"
+                json="$(curl -fsSL --retry 3 --retry-delay 5 "${meta_url}")"
+
+                pkg_name="$(echo "${json}" | jq -r '.[0].binary.package.name')"
+                pkg_link="$(echo "${json}" | jq -r '.[0].binary.package.link')"
+                pkg_sha="$(echo "${json}" | jq -r '.[0].binary.package.checksum')"
+                release_name="$(echo "${json}" | jq -r '.[0].release_name')"
+                ver_quad="$(echo "${json}" | jq -r '.[0].version_data | "\(.major).\(.minor).\(.security).\(.patch // 0)"')"
+
+                echo "Downloading ${pkg_name} (${release_name}) ..."
+                curl -fSL --retry 3 --retry-delay 5 -o "dist/${pkg_name}" "${pkg_link}"
+                actual="$(sha256sum "dist/${pkg_name}" | awk '{print $1}')"
+                if [ "${pkg_sha}" != "${actual}" ]; then
+                  echo "ERROR: SHA256 mismatch for ${pkg_name}"
+                  exit 1
+                fi
+              done
+
+              check_patched_version "${ver_quad}"
+              linux_pkg="$(ls dist/*x64_linux*.tar.gz | head -n1)"
+              mkdir -p work/extract
+              tar -xzf "${linux_pkg}" -C work/extract --strip-components=1
+              java_ver_raw="$(work/extract/bin/java -version 2>&1)"
+
+              clean_tag="temurin-${release_name#jdk-}"
+              RELEASE_TAG="${clean_tag//+/_}"
+              RELEASE_TITLE="Eclipse Temurin ${release_name}"
+              SOURCE_DESC="Eclipse Adoptium official release \`${release_name}\` (GPLv2+CE)"
+              ;;
+
+            amazon-corretto)
+              PLATFORMS=(
+                "x64-linux:tar.gz"
+                "aarch64-linux:tar.gz"
+                "aarch64-macos:tar.gz"
+                "x64-windows:zip"
+              )
+              for item in "${PLATFORMS[@]}"; do
+                plat="${item%%:*}"
+                ext="${item##*:}"
+                file="amazon-corretto-${MAJOR_VER}-${plat}-jdk.${ext}"
+                url="https://corretto.aws/downloads/latest/${file}"
+                sha_url="https://corretto.aws/downloads/latest_sha256/${file}"
+
+                echo "Downloading ${url} ..."
+                curl -fSL --retry 3 --retry-delay 5 -o "work/${file}" "${url}"
+                expected="$(curl -fsSL --retry 3 --retry-delay 5 "${sha_url}" | awk '{print $1}')"
+                actual="$(sha256sum "work/${file}" | awk '{print $1}')"
+                if [ "$
