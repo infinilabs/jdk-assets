@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       confirm:
-        description: "输入 DELETE 确认删除本仓库所有 Release 和 Tag"
+        description: "确认删除本仓库所有 Release 和 Tag"
         type: string
         required: true
         default: "DELETE"
