@@ -23,11 +23,11 @@ on:
           - "21"
           - "25"
       require_patched:
-        description: "强制校验版本 (17.0.21.1 / 21.0.13.1 / 25.0.5.1)"
+        description: "是否强制校验版本"
         type: boolean
         default: true
       force_overwrite:
-        description: "若对应版本 Tag 的 Release 已存在，是否强制覆盖"
+        description: "是否强制覆盖已存在版本"
         type: boolean
         default: false
 
@@ -114,7 +114,7 @@ jobs:
               mkdir -p work/extract
               tar -xzf "${linux_pkg}" -C work/extract --strip-components=1
               java_ver_raw="$(work/extract/bin/java -version 2>&1)"
-              actual_version="$(grep '^JAVA_VERSION=' work/extract/release | cut -d'"' -f2)"
+              actual_version="$(awk -F'"' '/^JAVA_VERSION=/{print $2}' work/extract/release)"
               check_patched_version "${actual_version}"
 
               cp work/*.tar.gz work/*.zip dist/
@@ -149,7 +149,7 @@ jobs:
               mkdir -p work/extract
               tar -xzf "work/graalvm-jdk-25_linux-x64_bin.tar.gz" -C work/extract --strip-components=1
               java_ver_raw="$(work/extract/bin/java -version 2>&1)"
-              actual_version="$(grep '^JAVA_VERSION=' work/extract/release | cut -d'"' -f2)"
+              actual_version="$(awk -F'"' '/^JAVA_VERSION=/{print $2}' work/extract/release)"
               check_patched_version "${actual_version}"
 
               for item in "${PLATFORMS[@]}"; do
@@ -203,7 +203,7 @@ jobs:
               clean_tag="temurin-${release_name#jdk-}"
               RELEASE_TAG="${clean_tag//+/_}"
               RELEASE_TITLE="Eclipse Temurin ${release_name}"
-              SOURCE_DESC="Eclipse Adoptium official release \`${release_name}\` (GPLv2+CE)"
+              SOURCE_DESC="Eclipse Adoptium official release ${release_name} (GPLv2+CE)"
               ;;
 
             amazon-corretto)
@@ -224,4 +224,72 @@ jobs:
                 curl -fSL --retry 3 --retry-delay 5 -o "work/${file}" "${url}"
                 expected="$(curl -fsSL --retry 3 --retry-delay 5 "${sha_url}" | awk '{print $1}')"
                 actual="$(sha256sum "work/${file}" | awk '{print $1}')"
-                if [ "$
+                if [ "${expected}" != "${actual}" ]; then
+                  echo "ERROR: SHA256 mismatch for ${file}"
+                  exit 1
+                fi
+              done
+
+              mkdir -p work/extract
+              tar -xzf "work/amazon-corretto-${MAJOR_VER}-x64-linux-jdk.tar.gz" -C work/extract --strip-components=1
+              java_ver_raw="$(work/extract/bin/java -version 2>&1)"
+              actual_version="$(awk -F'"' '/^JAVA_VERSION=/{print $2}' work/extract/release)"
+              check_patched_version "${actual_version}"
+
+              for item in "${PLATFORMS[@]}"; do
+                plat="${item%%:*}"
+                ext="${item##*:}"
+                mv "work/amazon-corretto-${MAJOR_VER}-${plat}-jdk.${ext}" \
+                   "dist/amazon-corretto-${actual_version}-${plat}-jdk.${ext}"
+              done
+
+              RELEASE_TAG="corretto-${actual_version}"
+              RELEASE_TITLE="Amazon Corretto ${actual_version} (LTS)"
+              SOURCE_DESC="Amazon Corretto official release (GPLv2+CE)"
+              ;;
+          esac
+
+          echo "=== Verified Java Output ==="
+          echo "${java_ver_raw}"
+
+          (
+            cd dist
+            archives=( *.tar.gz *.zip )
+            if [ "${#archives[@]}" -eq 0 ]; then
+              echo "ERROR: No archive files found in dist/"
+              exit 1
+            fi
+            for f in "${archives[@]}"; do
+              sha512sum "${f}" > "${f}.sha512"
+            done
+            sha256sum "${archives[@]}" > SHA256SUMS.txt
+            sha512sum "${archives[@]}" > SHA512SUMS.txt
+          )
+
+          echo "=== Generated Release Assets ==="
+          ls -lh dist/
+          cat dist/SHA512SUMS.txt
+
+          {
+            printf 'Synced from %s.\n' "${SOURCE_DESC}"
+            printf 'Java4Shell (CVE-2026-114938) check (`require_patched=%s`, min=`%s`): **PASSED**\n\n' "${REQUIRE_PATCHED}" "${MIN_PATCHED}"
+            printf '```text\n%s\n```\n' "${java_ver_raw}"
+          } > work/release_notes.md
+
+          echo "RELEASE_TAG=${RELEASE_TAG}" >> "$GITHUB_ENV"
+          echo "RELEASE_TITLE=${RELEASE_TITLE}" >> "$GITHUB_ENV"
+
+      - name: Publish Release
+        run: |
+          set -euo pipefail
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            if [ "${{ inputs.force_overwrite }}" != "true" ]; then
+              echo "Release ${RELEASE_TAG} already exists. Skip uploading (check force_overwrite to update)."
+              exit 0
+            fi
+            gh release upload "${RELEASE_TAG}" dist/* --clobber
+          else
+            gh release create "${RELEASE_TAG}" dist/* \
+              --title "${RELEASE_TITLE}" \
+              --notes-file work/release_notes.md
+          fi
