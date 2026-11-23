@@ -1,10 +1,31 @@
-name: Delete All Releases
+name: Cleanup JDK Releases
 
 on:
   workflow_dispatch:
     inputs:
+      brand:
+        description: "选择要清理的 JDK 品牌"
+        type: choice
+        required: true
+        default: "all"
+        options:
+          - all
+          - tencent-kona
+          - eclipse-temurin
+          - amazon-corretto
+          - oracle-graalvm
+      major_version:
+        description: "选择要清理的 JDK 主版本"
+        type: choice
+        required: true
+        default: "all"
+        options:
+          - all
+          - "17"
+          - "21"
+          - "25"
       confirm:
-        description: "确认删除本仓库所有 Release 和 Tag"
+        description: "输入 DELETE 确认执行清理"
         type: string
         required: true
         default: "DELETE"
@@ -17,6 +38,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      BRAND: ${{ inputs.brand }}
+      MAJOR_VER: ${{ inputs.major_version }}
+      REPO: ${{ github.repository }}
     steps:
       - name: Check confirmation
         run: |
@@ -25,27 +49,82 @@ jobs:
             exit 1
           fi
 
-      - name: Delete all releases and tags
+      - name: Cleanup releases & assets
         run: |
           set -euo pipefail
-          REPO="${{ github.repository }}"
 
-          tags="$(gh release list --repo "${REPO}" --limit 200 --json tagName -q '.[].tagName')"
-          if [ -z "${tags}" ]; then
-            echo "当前没有任何 Release。"
-          else
-            for tag in ${tags}; do
-              echo "Deleting release and tag: ${tag}"
-              gh release delete "${tag}" --repo "${REPO}" --yes --cleanup-tag
+          # 情况 1：全部品牌 + 全部版本 -> 清空本仓库所有 Release 及所有 Tag（含历史旧命名）
+          if [ "${BRAND}" = "all" ] && [ "${MAJOR_VER}" = "all" ]; then
+            tags="$(gh release list --repo "${REPO}" --limit 200 --json tagName -q '.[].tagName')"
+            if [ -z "${tags}" ]; then
+              echo "当前没有任何 Release。"
+            else
+              for tag in ${tags}; do
+                echo "Deleting release and tag: ${tag}"
+                gh release delete "${tag}" --repo "${REPO}" --yes --cleanup-tag
+              done
+            fi
+
+            orphan_refs="$(gh api --paginate "repos/${REPO}/git/refs/tags" --jq '.[].ref' 2>/dev/null || true)"
+            for ref in ${orphan_refs}; do
+              tag_name="${ref#refs/tags/}"
+              echo "Deleting leftover tag: ${tag_name}"
+              gh api -X DELETE "repos/${REPO}/git/refs/tags/${tag_name}" >/dev/null || true
             done
+
+            echo "全部 Release 和 Tag 已清理完成。"
+            exit 0
           fi
 
-          # 清理可能残留的孤立 Git Tag
-          orphan_refs="$(gh api --paginate "repos/${REPO}/git/refs/tags" --jq '.[].ref' 2>/dev/null || true)"
-          for ref in ${orphan_refs}; do
-            tag_name="${ref#refs/tags/}"
-            echo "Deleting leftover tag: ${tag_name}"
-            gh api -X DELETE "repos/${REPO}/git/refs/tags/${tag_name}" >/dev/null || true
+          # 确定本次要处理的品牌列表
+          if [ "${BRAND}" = "all" ]; then
+            BRANDS=(tencent-kona eclipse-temurin amazon-corretto oracle-graalvm)
+          else
+            BRANDS=("${BRAND}")
+          fi
+
+          for b in "${BRANDS[@]}"; do
+            case "${b}" in
+              tencent-kona)    tag="kona" ;;
+              eclipse-temurin) tag="temurin" ;;
+              amazon-corretto) tag="corretto" ;;
+              oracle-graalvm)  tag="graalvm" ;;
+              *) echo "Unsupported brand: ${b}"; exit 1 ;;
+            esac
+
+            if ! gh release view "${tag}" --repo "${REPO}" >/dev/null 2>&1; then
+              echo "Release ${tag} does not exist, skipping."
+              continue
+            fi
+
+            # 情况 2：指定品牌 + 全部版本 -> 删除该品牌的整个 Release 及 Tag
+            if [ "${MAJOR_VER}" = "all" ]; then
+              echo "Deleting release and tag: ${tag}"
+              gh release delete "${tag}" --repo "${REPO}" --yes --cleanup-tag
+              continue
+            fi
+
+            # 情况 3：指定版本 -> 仅删除该 Release 下对应主版本的资产（如 kona-jdk-17_*）
+            prefix="${tag}-jdk-${MAJOR_VER}_"
+            matched_assets="$(gh release view "${tag}" --repo "${REPO}" --json assets -q ".assets[].name | select(startswith(\"${prefix}\"))")"
+
+            if [ -z "${matched_assets}" ]; then
+              echo "No assets matching '${prefix}*' in release ${tag}, skipping."
+              continue
+            fi
+
+            while IFS= read -r asset; do
+              [ -z "${asset}" ] && continue
+              echo "Deleting asset ${asset} from release ${tag} ..."
+              gh release delete-asset "${tag}" "${asset}" --repo "${REPO}" --yes
+            done <<< "${matched_assets}"
+
+            # 如果删完之后该 Release 里没有任何文件了，顺手把空 Release 和 Tag 也清理掉
+            remaining="$(gh release view "${tag}" --repo "${REPO}" --json assets -q '.assets | length')"
+            if [ "${remaining}" -eq 0 ]; then
+              echo "Release ${tag} has no remaining assets, deleting empty release and tag..."
+              gh release delete "${tag}" --repo "${REPO}" --yes --cleanup-tag
+            fi
           done
 
-          echo "全部 Release 和 Tag 已清理完成。"
+          echo "指定清理任务完成。"

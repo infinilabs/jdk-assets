@@ -30,6 +30,11 @@ on:
         type: boolean
         default: false
 
+# 同一品牌排队执行，防止同时跑 17 和 21 时并发创建同一个 Release 撞车
+concurrency:
+  group: sync-jdk-${{ inputs.brand }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
@@ -133,6 +138,12 @@ jobs:
                 esac
                 mv "${archive}" "dist/${target}"
               done
+
+              if [ ! -f "dist/kona-jdk-${MAJOR_VER}_linux-x64_bin.tar.gz" ]; then
+                echo "ERROR: Missing kona-jdk-${MAJOR_VER}_linux-x64_bin.tar.gz! Found in dist/:"
+                ls -la dist/
+                exit 1
+              fi
 
               mkdir -p work/extract
               tar -xzf "dist/kona-jdk-${MAJOR_VER}_linux-x64_bin.tar.gz" -C work/extract --strip-components=1

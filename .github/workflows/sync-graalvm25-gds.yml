@@ -48,13 +48,9 @@ jobs:
           if [ -z "${JDK_DIR}" ] || [ ! -d "${JDK_DIR}" ]; then
             JDK_DIR="$(dirname "$(dirname "$(command -v java)")")"
           fi
-          echo "JDK_DIR=${JDK_DIR}"
-          cat "${JDK_DIR}/release"
           java_out="$("${JDK_DIR}/bin/java" -version 2>&1)"
-          echo "=== java -version ==="
           echo "${java_out}"
 
-          # 从 java -version 输出中提取完整版本（如 25.0.5.1）
           actual_version="$(echo "${java_out}" | grep -oE '25\.[0-9]+(\.[0-9]+){1,2}' | head -n1)"
           echo "Detected actual_version=${actual_version}"
 
@@ -72,7 +68,7 @@ jobs:
 
           base_dir="$(dirname "${JDK_DIR}")"
           folder_name="$(basename "${JDK_DIR}")"
-          pkg_name="graalvm-jdk-${actual_version}_${{ matrix.plat }}_bin.${{ matrix.ext }}"
+          pkg_name="graalvm-jdk-25_${{ matrix.plat }}_bin.${{ matrix.ext }}"
 
           if [ "${{ matrix.ext }}" = "tar.gz" ]; then
             COPYFILE_DISABLE=1 tar -czf "out/${pkg_name}" -C "${base_dir}" "${folder_name}"
@@ -101,9 +97,7 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-
-          ver="$(ls dist/*.tar.gz | head -n1 | sed -E 's/.*graalvm-jdk-([^_]+)_.*/\1/')"
-          tag="graalvm-${ver}"
+          tag="graalvm"
 
           (
             cd dist
@@ -115,25 +109,27 @@ jobs:
             for f in "${archives[@]}"; do
               sha512sum "${f}" > "${f}.sha512"
             done
-            sha256sum "${archives[@]}" > SHA256SUMS.txt
-            sha512sum "${archives[@]}" > SHA512SUMS.txt
+            sha256sum "${archives[@]}" > graalvm-jdk-25_SHA256SUMS.txt
+            sha512sum "${archives[@]}" > graalvm-jdk-25_SHA512SUMS.txt
           )
 
           echo "=== Generated Release Assets ==="
           ls -lh dist/
-          cat dist/SHA512SUMS.txt
 
           REPO="${{ github.repository }}"
           if gh release view "${tag}" --repo "${REPO}" >/dev/null 2>&1; then
-            if [ "${{ inputs.force_overwrite }}" != "true" ]; then
-              echo "Release ${tag} already exists. Skip."
-              exit 0
+            existing_assets="$(gh release view "${tag}" --repo "${REPO}" --json assets -q '.assets[].name')"
+            if echo "${existing_assets}" | grep -q "^graalvm-jdk-25_"; then
+              if [ "${{ inputs.force_overwrite }}" != "true" ]; then
+                echo "Assets for graalvm-jdk-25 already exist in release ${tag}. Skip."
+                exit 0
+              fi
             fi
             gh release upload "${tag}" dist/* --clobber --repo "${REPO}"
           else
             gh release create "${tag}" dist/* \
               --repo "${REPO}" \
               --target "${{ github.ref_name }}" \
-              --title "Oracle GraalVM ${ver} (LTS)" \
+              --title "Oracle GraalVM JDK" \
               --notes "Synced via graalvm/setup-graalvm (Oracle GDS, GFTC License). Patched for Java4Shell (CVE-2026-114938)."
           fi
