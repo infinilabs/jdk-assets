@@ -51,17 +51,20 @@ jobs:
 
             for f in "${archives[@]}"; do
               if [ -f "${f}.sha512" ]; then
-                expected="$(awk '{print $1}' "${f}.sha512" | tr -d '\r' | tr '[:upper:]' '[:lower:]')"
+                expected="$(grep -oE '(^|[^0-9a-fA-F])[0-9a-fA-F]{128}([^0-9a-fA-F]|$)' "${f}.sha512" | grep -oE '[0-9a-fA-F]{128}' | head -n1 | tr '[:upper:]' '[:lower:]')"
                 actual="$(sha512sum "${f}" | awk '{print $1}' | tr '[:upper:]' '[:lower:]')"
                 if [ -z "${expected}" ] || [ "${expected}" != "${actual}" ]; then
-                  echo "ERROR: SHA512 mismatch for ${f} (expected=${expected}, actual=${actual})"
+                  echo "ERROR: SHA512 mismatch for ${f}"
+                  echo "  raw .sha512 : $(cat "${f}.sha512")"
+                  echo "  expected    : ${expected}"
+                  echo "  actual      : ${actual}"
                   exit 1
                 fi
                 echo "Verified existing SHA512: ${f}"
-              else
-                sha512sum "${f}" > "${f}.sha512"
-                echo "Generated SHA512: ${f}.sha512"
               fi
+
+              # 统一输出为标准两列格式 (<hash>  <filename>)，确保下游 sha512sum -c / shasum -a 512 -c 兼容
+              sha512sum "${f}" > "${f}.sha512"
             done
           )
 
@@ -119,9 +122,7 @@ jobs:
               case "${f}" in
                 *.sha512|*.sha256) continue ;;
               esac
-              if [ ! -f "${f}.sha512" ]; then
-                sha512sum "${f}" > "${f}.sha512"
-              fi
+              sha512sum "${f}" > "${f}.sha512"
             done
           )
 
